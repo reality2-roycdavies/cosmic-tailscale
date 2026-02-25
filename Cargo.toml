@@ -1,0 +1,35 @@
+[package]
+name = "cosmic-tailscale"
+version = "0.1.0"
+edition = "2021"
+authors = ["Roy C. Davies"]
+license = "MIT"
+description = "Tailscale VPN applet for COSMIC desktop"
+
+[lib]
+name = "cosmic_tailscale"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cosmic-tailscale"
+path = "src/main.rs"
+
+[dependencies]
+# COSMIC GUI toolkit (applet mode for panel integration)
+libcosmic = { git = "https://github.com/pop-os/libcosmic.git", default-features = false, features = [
+    "applet",
+] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# JSON parsing for config and tailscale CLI output
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# File path helpers
+dirs = "6"
+
+[profile.release]
+lto = true
+codegen-units = 1

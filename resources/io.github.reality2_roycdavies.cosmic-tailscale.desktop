@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Tailscale
+Comment=Tailscale VPN applet for COSMIC desktop
+Exec=cosmic-tailscale
+Icon=io.github.reality2_roycdavies.cosmic-tailscale
+Terminal=false
+Type=Application
+Categories=Settings;Network;
+OnlyShowIn=COSMIC;
+NoDisplay=true
+X-CosmicApplet=true
