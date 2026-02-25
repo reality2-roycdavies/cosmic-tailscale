@@ -567,7 +567,7 @@ impl TailscaleApplet {
 
         let name_label = format!(
             "{status_indicator}{} ({})",
-            peer.hostname, peer.os
+            peer.display_name(), peer.os
         );
 
         // Show "Copied!" feedback for the peer whose IP was just copied

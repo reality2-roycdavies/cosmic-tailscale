@@ -20,10 +20,22 @@ pub struct NodeInfo {
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
     pub hostname: String,
+    pub dns_name: String,
     pub tailscale_ips: Vec<String>,
     pub os: String,
     pub online: bool,
     pub exit_node: bool,
+}
+
+impl PeerInfo {
+    /// The display name: first label of DNSName if available, otherwise hostname.
+    pub fn display_name(&self) -> &str {
+        if !self.dns_name.is_empty() {
+            self.dns_name.split('.').next().unwrap_or(&self.hostname)
+        } else {
+            &self.hostname
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +72,8 @@ struct RawStatus {
 struct RawPeer {
     #[serde(default)]
     host_name: String,
+    #[serde(default, rename = "DNSName")]
+    dns_name: String,
     #[serde(default, rename = "TailscaleIPs")]
     tailscale_ips: Vec<String>,
     #[serde(default, rename = "OS")]
@@ -142,6 +156,7 @@ pub fn get_status() -> Result<TailscaleStatus, String> {
         .into_values()
         .map(|p| PeerInfo {
             hostname: p.host_name,
+            dns_name: p.dns_name,
             tailscale_ips: p.tailscale_ips,
             os: p.os,
             online: p.online,
