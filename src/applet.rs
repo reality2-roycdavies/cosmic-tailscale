@@ -338,12 +338,14 @@ impl cosmic::Application for TailscaleApplet {
 
             Message::OpenSettings => {
                 std::thread::spawn(|| {
-                    // Try the unified settings app first
+                    // Don't spawn a second instance if already running
+                    if let Ok(output) = std::process::Command::new("pgrep").arg("-f").arg("cosmic-applet-settings").output() {
+                        if output.status.success() { return; }
+                    }
                     let unified = std::process::Command::new("cosmic-applet-settings")
                         .arg("tailscale")
                         .spawn();
                     if unified.is_err() {
-                        // Fallback to standalone settings window
                         let exe = std::env::current_exe()
                             .unwrap_or_else(|_| "cosmic-tailscale".into());
                         if let Err(e) = std::process::Command::new(exe).arg("--settings").spawn() {
