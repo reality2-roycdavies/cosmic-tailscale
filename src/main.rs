@@ -1,4 +1,5 @@
 mod applet;
+mod config;
 mod settings;
 mod settings_page;
 mod tailscale;

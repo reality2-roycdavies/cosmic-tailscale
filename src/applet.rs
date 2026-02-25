@@ -6,6 +6,7 @@ use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::widget::{self, text};
 use cosmic::Element;
 
+use crate::config::AppConfig;
 use crate::tailscale::{self, PeerInfo, TailscaleStatus};
 
 const APP_ID: &str = "io.github.reality2_roycdavies.cosmic-tailscale";
@@ -26,8 +27,13 @@ pub enum Message {
     PollStatus,
     ToggleConnection,
     CopyIp(String),
+    LaunchNoMachine(String),
+    LaunchSsh(String),
     OpenSettings,
     OpenAdminConsole,
+    EditSshUser(String),
+    SshUserInput(String),
+    SaveSshUser(String),
     PopupClosed(Id),
     Surface(cosmic::surface::Action),
 }
@@ -47,6 +53,8 @@ pub struct TailscaleApplet {
     error: Option<String>,
     copied_ip: Option<String>,
     copied_hold_ticks: u8,
+    config: AppConfig,
+    editing_ssh_user: Option<(String, String)>,
     cmd_tx: std::sync::mpsc::Sender<TailscaleCommand>,
     event_rx: std::sync::mpsc::Receiver<TailscaleEvent>,
 }
@@ -113,6 +121,8 @@ impl cosmic::Application for TailscaleApplet {
             error: None,
             copied_ip: None,
             copied_hold_ticks: 0,
+            config: AppConfig::load(),
+            editing_ssh_user: None,
             cmd_tx,
             event_rx,
         };
@@ -224,6 +234,106 @@ impl cosmic::Application for TailscaleApplet {
                 });
                 self.copied_ip = Some(ip);
                 self.copied_hold_ticks = 3; // ~9 seconds at 3s poll
+            }
+
+            Message::LaunchNoMachine(ip) => {
+                std::thread::spawn(move || {
+                    let nxs_content = format!(
+                        r#"<!DOCTYPE NXClientSettings>
+<NXClientSettings version="2.3" application="nxclient">
+ <group name="General">
+  <option key="Connection service" value="nx" />
+  <option key="Server host" value="{ip}" />
+  <option key="Server port" value="22" />
+  <option key="NoMachine daemon port" value="4000" />
+  <option key="Session" value="unix" />
+ </group>
+ <group name="Login">
+  <option key="Server authentication method" value="system" />
+  <option key="NX login method" value="password" />
+  <option key="Auth" value="EMPTY_PASSWORD" />
+  <option key="User" value="" />
+ </group>
+</NXClientSettings>"#
+                    );
+                    // Write to ~/.nx/ which the Flatpak sandbox can access
+                    let nx_dir = dirs::home_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                        .join(".nx");
+                    let _ = std::fs::create_dir_all(&nx_dir);
+                    let path = nx_dir.join(format!("cosmic-tailscale-{ip}.nxs"));
+                    if let Err(e) = std::fs::write(&path, nxs_content) {
+                        eprintln!("Failed to write .nxs file: {e}");
+                        return;
+                    }
+                    if let Err(e) = std::process::Command::new("flatpak")
+                        .args(["run", "com.nomachine.nxplayer", "--session"])
+                        .arg(&path)
+                        .spawn()
+                    {
+                        eprintln!("Failed to launch nxplayer: {e}");
+                    }
+                });
+            }
+
+            Message::LaunchSsh(ip) => {
+                // Look up configured SSH username for this peer
+                let ssh_target = self
+                    .peers
+                    .iter()
+                    .find(|p| p.tailscale_ips.first().map(|s| s.as_str()) == Some(&ip))
+                    .and_then(|p| self.config.ssh_usernames.get(&p.hostname))
+                    .filter(|u| !u.is_empty())
+                    .map(|user| format!("{user}@{ip}"))
+                    .unwrap_or_else(|| ip.clone());
+
+                std::thread::spawn(move || {
+                    // Try cosmic-term first, then common terminal emulators
+                    let terminals = [
+                        ("cosmic-term", vec!["-e", "ssh", &ssh_target]),
+                        ("gnome-terminal", vec!["--", "ssh", &ssh_target]),
+                        ("konsole", vec!["-e", "ssh", &ssh_target]),
+                        ("xterm", vec!["-e", "ssh", &ssh_target]),
+                    ];
+                    for (term, args) in &terminals {
+                        if let Ok(_) = std::process::Command::new(term)
+                            .args(args)
+                            .spawn()
+                        {
+                            return;
+                        }
+                    }
+                    eprintln!("Failed to launch ssh: no terminal emulator found");
+                });
+            }
+
+            Message::EditSshUser(hostname) => {
+                let current = self
+                    .config
+                    .ssh_usernames
+                    .get(&hostname)
+                    .cloned()
+                    .unwrap_or_default();
+                self.editing_ssh_user = Some((hostname, current));
+            }
+
+            Message::SshUserInput(text) => {
+                if let Some((_, ref mut input)) = self.editing_ssh_user {
+                    *input = text;
+                }
+            }
+
+            Message::SaveSshUser(hostname) => {
+                if let Some((_, ref input)) = self.editing_ssh_user {
+                    let username = input.trim().to_string();
+                    if username.is_empty() {
+                        self.config.ssh_usernames.remove(&hostname);
+                    } else {
+                        self.config.ssh_usernames.insert(hostname, username);
+                    }
+                    self.config.save();
+                }
+                self.editing_ssh_user = None;
             }
 
             Message::OpenSettings => {
@@ -446,7 +556,8 @@ impl TailscaleApplet {
     }
 
     fn peer_row(&self, peer: &PeerInfo) -> Element<'_, Message> {
-        use cosmic::iced::widget::column;
+        use cosmic::iced::widget::{column, horizontal_space, row};
+        use cosmic::iced::Alignment;
 
         let ip_str = peer.tailscale_ips.first().cloned().unwrap_or_default();
 
@@ -470,14 +581,82 @@ impl TailscaleApplet {
             peer_col = peer_col.push(text::caption("  Exit node (active)"));
         }
 
-        // Wrap in a clickable button using MenuItem style
+        // Wrap in a clickable button using MenuItem style — full width
         let ip_for_click = ip_str.clone();
-        widget::button::custom(peer_col)
+        let peer_btn: Element<Message> = widget::button::custom(peer_col)
             .on_press(Message::CopyIp(ip_for_click))
             .padding([4, 8])
             .class(cosmic::theme::Button::MenuItem)
             .width(Length::Fill)
-            .into()
+            .into();
+
+        if peer.online {
+            let is_editing = self
+                .editing_ssh_user
+                .as_ref()
+                .map(|(h, _)| h == &peer.hostname)
+                .unwrap_or(false);
+
+            let nx_btn: Element<Message> = widget::button::standard("NX")
+                .on_press(Message::LaunchNoMachine(ip_str.clone()))
+                .into();
+
+            let buttons_row = if is_editing {
+                let input_value = self
+                    .editing_ssh_user
+                    .as_ref()
+                    .map(|(_, v)| v.as_str())
+                    .unwrap_or("");
+                let hostname = peer.hostname.clone();
+                let hostname2 = peer.hostname.clone();
+
+                let input: Element<Message> = widget::text_input("username", input_value)
+                    .on_input(Message::SshUserInput)
+                    .on_submit(move |_| Message::SaveSshUser(hostname.clone()))
+                    .width(Length::Fixed(100.0))
+                    .into();
+
+                let save_btn: Element<Message> = widget::button::standard("Save")
+                    .on_press(Message::SaveSshUser(hostname2))
+                    .into();
+
+                row![input, save_btn, horizontal_space(), nx_btn]
+                    .spacing(4)
+                    .align_y(Alignment::Center)
+            } else {
+                let configured_user = self
+                    .config
+                    .ssh_usernames
+                    .get(&peer.hostname)
+                    .filter(|u| !u.is_empty());
+
+                let user_label = match configured_user {
+                    Some(user) => format!("{user}@"),
+                    None => "user@".to_string(),
+                };
+
+                let hostname = peer.hostname.clone();
+                let user_btn: Element<Message> = widget::button::custom(text::caption(user_label))
+                    .on_press(Message::EditSshUser(hostname))
+                    .padding([2, 4])
+                    .class(cosmic::theme::Button::MenuItem)
+                    .into();
+
+                let ssh_btn: Element<Message> = widget::button::standard("SSH")
+                    .on_press(Message::LaunchSsh(ip_str))
+                    .into();
+
+                row![user_btn, ssh_btn, horizontal_space(), nx_btn]
+                    .spacing(4)
+                    .align_y(Alignment::Center)
+            };
+
+            column![peer_btn, buttons_row]
+                .spacing(2)
+                .into()
+        } else {
+            peer_btn
+        }
     }
 }
 
