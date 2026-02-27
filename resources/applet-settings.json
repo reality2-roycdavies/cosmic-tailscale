@@ -1,0 +1,6 @@
+{
+    "name": "Tailscale VPN",
+    "icon": "io.github.reality2_roycdavies.cosmic-tailscale-symbolic",
+    "applet_id": "io.github.reality2_roycdavies.cosmic-tailscale",
+    "settings_cmd": "cosmic-tailscale --settings-standalone"
+}
