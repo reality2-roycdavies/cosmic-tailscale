@@ -256,7 +256,7 @@ impl cosmic::Application for TailscaleApplet {
  </group>
 </NXClientSettings>"#
                     );
-                    // Write to ~/.nx/ which the Flatpak sandbox can access
+                    // Write session file to ~/.nx/ for nxplayer to read
                     let nx_dir = dirs::home_dir()
                         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
                         .join(".nx");
