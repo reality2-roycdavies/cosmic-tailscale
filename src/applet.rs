@@ -266,12 +266,19 @@ impl cosmic::Application for TailscaleApplet {
                         eprintln!("Failed to write .nxs file: {e}");
                         return;
                     }
-                    if let Err(e) = std::process::Command::new("flatpak")
-                        .args(["run", "com.nomachine.nxplayer", "--session"])
+                    // Try native nxplayer first, fall back to Flatpak version
+                    let native = std::process::Command::new("nxplayer")
+                        .args(["--session"])
                         .arg(&path)
-                        .spawn()
-                    {
-                        eprintln!("Failed to launch nxplayer: {e}");
+                        .spawn();
+                    if native.is_err() {
+                        if let Err(e) = std::process::Command::new("flatpak")
+                            .args(["run", "com.nomachine.nxplayer", "--session"])
+                            .arg(&path)
+                            .spawn()
+                        {
+                            eprintln!("Failed to launch nxplayer: {e}");
+                        }
                     }
                 });
             }
