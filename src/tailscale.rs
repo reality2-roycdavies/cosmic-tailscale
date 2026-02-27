@@ -14,7 +14,19 @@ pub struct TailscaleStatus {
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
     pub hostname: String,
+    pub dns_name: String,
     pub tailscale_ips: Vec<String>,
+}
+
+impl NodeInfo {
+    /// The display name: first label of DNSName if available, otherwise hostname.
+    pub fn display_name(&self) -> &str {
+        if !self.dns_name.is_empty() {
+            self.dns_name.split('.').next().unwrap_or(&self.hostname)
+        } else {
+            &self.hostname
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +158,7 @@ pub fn get_status() -> Result<TailscaleStatus, String> {
 
     let self_node = NodeInfo {
         hostname: raw.self_node.host_name,
+        dns_name: raw.self_node.dns_name,
         tailscale_ips: raw.self_node.tailscale_ips,
     };
 

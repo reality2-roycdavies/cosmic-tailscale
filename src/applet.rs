@@ -83,7 +83,7 @@ impl cosmic::Application for TailscaleApplet {
             match tailscale::get_status() {
                 Ok(status) => (
                     status.backend_state == "Running",
-                    status.self_node.hostname.clone(),
+                    status.self_node.display_name().to_string(),
                     status
                         .self_node
                         .tailscale_ips
@@ -150,7 +150,7 @@ impl cosmic::Application for TailscaleApplet {
                         TailscaleEvent::StatusUpdate(result) => match result {
                             Ok(status) => {
                                 self.connected = status.backend_state == "Running";
-                                self.self_hostname = status.self_node.hostname;
+                                self.self_hostname = status.self_node.display_name().to_string();
                                 self.self_ip = status
                                     .self_node
                                     .tailscale_ips

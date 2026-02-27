@@ -13,6 +13,7 @@ pub struct State {
     pub exit_node_allow_lan: bool,
     pub webclient: bool,
     pub hostname: String,
+    pub hostname_placeholder: String,
     pub advertise_routes: String,
     pub login_name: String,
     pub status_message: String,
@@ -55,6 +56,11 @@ pub fn init() -> State {
         ),
     };
 
+    let hostname_placeholder = match tailscale::get_status() {
+        Ok(s) => format!("(use OS hostname: {})", s.self_node.display_name()),
+        Err(_) => "(use OS hostname)".to_string(),
+    };
+
     State {
         accept_dns: prefs.accept_dns,
         accept_routes: prefs.accept_routes,
@@ -64,6 +70,7 @@ pub fn init() -> State {
         exit_node_allow_lan: prefs.exit_node_allow_lan,
         webclient: prefs.webclient,
         hostname: prefs.hostname,
+        hostname_placeholder,
         advertise_routes: prefs.advertise_routes,
         login_name: prefs.login_name,
         status_message,
@@ -177,6 +184,10 @@ pub fn update(state: &mut State, message: Message) {
                 }
                 Err(e) => state.status_message = format!("Error reloading: {e}"),
             }
+            if let Ok(status) = tailscale::get_status() {
+                state.hostname_placeholder =
+                    format!("(use OS hostname: {})", status.self_node.display_name());
+            }
         }
     }
 }
@@ -245,7 +256,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
         .add(settings::item(
             "Hostname override",
             cosmic::iced::widget::row![
-                text_input("(use OS hostname)", &state.hostname)
+                text_input(&state.hostname_placeholder, &state.hostname)
                     .on_input(Message::HostnameChanged)
                     .on_submit(|_| Message::ApplyHostname)
                     .width(Length::Fixed(250.0)),
