@@ -5,6 +5,10 @@ edition = "2021"
 authors = ["Roy C. Davies"]
 license = "MIT"
 description = "Tailscale VPN applet for COSMIC desktop"
+keywords = ["cosmic-desktop", "tailscale", "vpn", "cosmic-applet", "linux"]
+categories = ["gui", "network-programming"]
+repository = "https://github.com/reality2-roycdavies/cosmic-tailscale"
+homepage = "https://github.com/reality2-roycdavies/cosmic-tailscale"
 
 [lib]
 name = "cosmic_tailscale"
