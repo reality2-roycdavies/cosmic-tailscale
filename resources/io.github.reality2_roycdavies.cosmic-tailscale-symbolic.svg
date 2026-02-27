@@ -1,10 +1,15 @@
 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Tailscale logo: three dots in a triangular arrangement -->
-  <circle cx="8" cy="3.5" r="2" fill="currentColor"/>
-  <circle cx="4.5" cy="10" r="2" fill="currentColor"/>
-  <circle cx="11.5" cy="10" r="2" fill="currentColor"/>
-  <!-- Connecting lines -->
-  <line x1="6.5" y1="4.8" x2="5.2" y2="8.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
-  <line x1="9.5" y1="4.8" x2="10.8" y2="8.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
-  <line x1="6.5" y1="10" x2="9.5" y2="10" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+  <!-- Tailscale 3x3 dot grid: default/connected state -->
+  <!-- Top row: muted -->
+  <circle cx="4" cy="4" r="1.6" fill="currentColor" opacity="0.35"/>
+  <circle cx="8" cy="4" r="1.6" fill="currentColor" opacity="0.35"/>
+  <circle cx="12" cy="4" r="1.6" fill="currentColor" opacity="0.35"/>
+  <!-- Middle row: bright -->
+  <circle cx="4" cy="8" r="1.6" fill="currentColor"/>
+  <circle cx="8" cy="8" r="1.6" fill="currentColor"/>
+  <circle cx="12" cy="8" r="1.6" fill="currentColor"/>
+  <!-- Bottom row: left muted, center bright, right muted -->
+  <circle cx="4" cy="12" r="1.6" fill="currentColor" opacity="0.35"/>
+  <circle cx="8" cy="12" r="1.6" fill="currentColor"/>
+  <circle cx="12" cy="12" r="1.6" fill="currentColor" opacity="0.35"/>
 </svg>
