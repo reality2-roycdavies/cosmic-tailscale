@@ -54,13 +54,6 @@ impl PeerInfo {
 pub struct TailscalePrefs {
     pub accept_dns: bool,
     pub accept_routes: bool,
-    pub shields_up: bool,
-    pub ssh: bool,
-    pub advertise_exit_node: bool,
-    pub exit_node_allow_lan: bool,
-    pub webclient: bool,
-    pub hostname: String,
-    pub advertise_routes: String,
     pub login_name: String,
 }
 
@@ -112,18 +105,6 @@ struct RawPrefs {
     corp_dns: bool,
     #[serde(default)]
     route_all: bool,
-    #[serde(default)]
-    shields_up: bool,
-    #[serde(default, rename = "RunSSH")]
-    run_ssh: bool,
-    #[serde(default)]
-    run_web_client: bool,
-    #[serde(default)]
-    hostname: String,
-    #[serde(default)]
-    advertise_routes: Option<Vec<String>>,
-    #[serde(default)]
-    exit_node_allow_lan_access: bool,
     #[serde(default)]
     config: Option<RawConfig>,
 }
@@ -212,27 +193,6 @@ pub fn get_prefs() -> Result<TailscalePrefs, String> {
     let raw: RawPrefs = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Failed to parse prefs JSON: {e}"))?;
 
-    // Check if exit node is being advertised by looking at advertise_routes
-    // (tailscale advertises 0.0.0.0/0 and ::/0 when acting as exit node)
-    let advertise_exit_node = raw
-        .advertise_routes
-        .as_ref()
-        .map(|routes| routes.iter().any(|r| r == "0.0.0.0/0" || r == "::/0"))
-        .unwrap_or(false);
-
-    let advertise_routes = raw
-        .advertise_routes
-        .as_ref()
-        .map(|routes| {
-            routes
-                .iter()
-                .filter(|r| *r != "0.0.0.0/0" && *r != "::/0")
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(",")
-        })
-        .unwrap_or_default();
-
     let login_name = raw
         .config
         .and_then(|c| c.user_profile)
@@ -242,13 +202,6 @@ pub fn get_prefs() -> Result<TailscalePrefs, String> {
     Ok(TailscalePrefs {
         accept_dns: raw.corp_dns,
         accept_routes: raw.route_all,
-        shields_up: raw.shields_up,
-        ssh: raw.run_ssh,
-        advertise_exit_node,
-        exit_node_allow_lan: raw.exit_node_allow_lan_access,
-        webclient: raw.run_web_client,
-        hostname: raw.hostname,
-        advertise_routes,
         login_name,
     })
 }
@@ -259,22 +212,6 @@ pub fn set_bool_pref(flag: &str, value: bool) -> Result<(), String> {
     } else {
         format!("--{flag}=false")
     };
-
-    let output = Command::new("tailscale")
-        .args(["set", &arg])
-        .output()
-        .map_err(|e| format!("Failed to run tailscale set: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("tailscale set {flag} failed: {stderr}"));
-    }
-
-    Ok(())
-}
-
-pub fn set_string_pref(flag: &str, value: &str) -> Result<(), String> {
-    let arg = format!("--{flag}={value}");
 
     let output = Command::new("tailscale")
         .args(["set", &arg])
