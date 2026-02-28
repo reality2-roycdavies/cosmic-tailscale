@@ -13,6 +13,11 @@ A Tailscale VPN status and control applet for the [COSMIC desktop environment](h
 - **Quick Controls**: Click the applet for Tailscale status and controls
 - **Settings Page**: Configurable via the unified COSMIC applet settings app
 
+## Screenshots
+
+![Tailscale settings in cosmic-applet-settings hub](screenshots/settings-inline.png)
+*Tailscale settings in the cosmic-applet-settings hub*
+
 ## Installation
 
 ### Prerequisites
