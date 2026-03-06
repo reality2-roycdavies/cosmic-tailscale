@@ -28,6 +28,7 @@ pub enum Message {
     ToggleConnection,
     CopyIp(String),
     LaunchNoMachine(String),
+    LaunchRdp(String),
     LaunchSsh(String),
     OpenSettings,
     OpenAdminConsole,
@@ -283,6 +284,17 @@ impl cosmic::Application for TailscaleApplet {
                 });
             }
 
+            Message::LaunchRdp(ip) => {
+                std::thread::spawn(move || {
+                    if let Err(e) = std::process::Command::new("remmina")
+                        .arg(&format!("rdp://{ip}"))
+                        .spawn()
+                    {
+                        eprintln!("Failed to launch remmina: {e}");
+                    }
+                });
+            }
+
             Message::LaunchSsh(ip) => {
                 // Look up configured SSH username for this peer
                 let ssh_target = self
@@ -404,7 +416,7 @@ impl cosmic::Application for TailscaleApplet {
                             let new_id = Id::unique();
                             state.popup = Some(new_id);
 
-                            let popup_width = 320u32;
+                            let popup_width = 360u32;
                             let popup_height = 450u32;
 
                             let mut popup_settings = state.core.applet.get_popup_settings(
@@ -565,7 +577,7 @@ impl TailscaleApplet {
     }
 
     fn peer_row(&self, peer: &PeerInfo) -> Element<'_, Message> {
-        use cosmic::iced::widget::{column, horizontal_space, row};
+        use cosmic::iced::widget::{column, row};
         use cosmic::iced::Alignment;
 
         let ip_str = peer.tailscale_ips.first().cloned().unwrap_or_default();
@@ -606,6 +618,10 @@ impl TailscaleApplet {
                 .map(|(h, _)| h == &peer.hostname)
                 .unwrap_or(false);
 
+            let rdp_btn: Element<Message> = widget::button::standard("RDP")
+                .on_press(Message::LaunchRdp(ip_str.clone()))
+                .into();
+
             let nx_btn: Element<Message> = widget::button::standard("NX")
                 .on_press(Message::LaunchNoMachine(ip_str.clone()))
                 .into();
@@ -629,7 +645,7 @@ impl TailscaleApplet {
                     .on_press(Message::SaveSshUser(hostname2))
                     .into();
 
-                row![input, save_btn, horizontal_space(), nx_btn]
+                row![input, save_btn, rdp_btn, nx_btn]
                     .spacing(4)
                     .align_y(Alignment::Center)
             } else {
@@ -655,7 +671,7 @@ impl TailscaleApplet {
                     .on_press(Message::LaunchSsh(ip_str))
                     .into();
 
-                row![user_btn, ssh_btn, horizontal_space(), nx_btn]
+                row![user_btn, ssh_btn, rdp_btn, nx_btn]
                     .spacing(4)
                     .align_y(Alignment::Center)
             };
