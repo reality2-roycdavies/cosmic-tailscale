@@ -57,6 +57,9 @@ install-local:
     cp resources/{{appid}}-symbolic.svg ~/.local/share/icons/hicolor/symbolic/apps/
     cp resources/{{appid}}-connected-symbolic.svg ~/.local/share/icons/hicolor/symbolic/apps/
     cp resources/{{appid}}-disconnected-symbolic.svg ~/.local/share/icons/hicolor/symbolic/apps/
+    cp resources/{{appid}}-nomachine.svg ~/.local/share/icons/hicolor/scalable/apps/
+    cp resources/{{appid}}-realvnc.svg ~/.local/share/icons/hicolor/scalable/apps/
+    cp resources/{{appid}}-vnc.svg ~/.local/share/icons/hicolor/scalable/apps/
 
     # Install applet registration for cosmic-applet-settings
     mkdir -p ~/.local/share/cosmic-applet-settings/applets
@@ -73,6 +76,9 @@ uninstall-local:
     rm -f ~/.local/share/icons/hicolor/symbolic/apps/{{appid}}-symbolic.svg
     rm -f ~/.local/share/icons/hicolor/symbolic/apps/{{appid}}-connected-symbolic.svg
     rm -f ~/.local/share/icons/hicolor/symbolic/apps/{{appid}}-disconnected-symbolic.svg
+    rm -f ~/.local/share/icons/hicolor/scalable/apps/{{appid}}-nomachine.svg
+    rm -f ~/.local/share/icons/hicolor/scalable/apps/{{appid}}-realvnc.svg
+    rm -f ~/.local/share/icons/hicolor/scalable/apps/{{appid}}-vnc.svg
     rm -f ~/.local/share/cosmic-applet-settings/applets/{{name}}.json
 
 # Build and run

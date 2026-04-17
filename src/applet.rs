@@ -6,8 +6,8 @@ use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::widget::{self, text};
 use cosmic::Element;
 
-use crate::config::AppConfig;
-use crate::tailscale::{self, PeerInfo, TailscaleStatus};
+use crate::config::{AppConfig, Credentials};
+use crate::tailscale::{self, PeerInfo, TailscaleStatus, VncType};
 
 const APP_ID: &str = "io.github.reality2_roycdavies.cosmic-tailscale";
 
@@ -22,19 +22,66 @@ enum TailscaleEvent {
     ToggleComplete(Result<String, String>),
 }
 
+/// Which service a credential dialog is for.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CredService {
+    Ssh,
+    Rdp,
+    Vnc,
+    NoMachine,
+}
+
+impl CredService {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Ssh => "SSH",
+            Self::Rdp => "RDP",
+            Self::Vnc => "VNC",
+            Self::NoMachine => "NoMachine",
+        }
+    }
+    fn key(&self) -> &'static str {
+        match self {
+            Self::Ssh => "ssh",
+            Self::Rdp => "rdp",
+            Self::Vnc => "vnc",
+            Self::NoMachine => "nomachine",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CredDialog {
+    service: CredService,
+    dns_name: String,
+    ip: String,
+    username: String,
+    remember: bool,
+    vnc_type: VncType,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     PollStatus,
     ToggleConnection,
-    CopyIp(String),
-    LaunchNoMachine(String),
-    LaunchRdp(String),
-    LaunchSsh(String),
+    CopyToClipboard(String),
+    // Service launches (direct, no dialog)
+    LaunchHttp(String),
+    // Credential dialog
+    ShowCredDialog {
+        service: CredService,
+        dns_name: String,
+        ip: String,
+        vnc_type: VncType,
+    },
+    CredUsername(String),
+    CredRemember(bool),
+    CredConnect,
+    CredCancel,
+    // Settings
     OpenSettings,
     OpenAdminConsole,
-    EditSshUser(String),
-    SshUserInput(String),
-    SaveSshUser(String),
+    // Popup
     PopupClosed(Id),
     Surface(cosmic::surface::Action),
 }
@@ -46,16 +93,27 @@ pub struct TailscaleApplet {
     is_toggling: bool,
     status_message: String,
     status_hold_ticks: u8,
+    // Self info
     self_hostname: String,
     self_ip: String,
+    self_dns_name: String,
+    self_https_url: String,
+    self_relay: String,
+    version: String,
     tailnet_name: String,
-    peers: Vec<PeerInfo>,
     exit_node_active: bool,
+    exit_node_name: String,
+    // Peers
+    peers: Vec<PeerInfo>,
     error: Option<String>,
-    copied_ip: Option<String>,
+    // Clipboard feedback
+    copied_text: Option<String>,
     copied_hold_ticks: u8,
+    // Config
     config: AppConfig,
-    editing_ssh_user: Option<(String, String)>,
+    // Credential dialog
+    cred_dialog: Option<CredDialog>,
+    // Background thread channels
     cmd_tx: std::sync::mpsc::Sender<TailscaleCommand>,
     event_rx: std::sync::mpsc::Receiver<TailscaleEvent>,
 }
@@ -80,9 +138,22 @@ impl cosmic::Application for TailscaleApplet {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
 
         // Get initial status
-        let (connected, self_hostname, self_ip, tailnet_name, peers, exit_node_active) =
-            match tailscale::get_status() {
-                Ok(status) => (
+        let (
+            connected,
+            self_hostname,
+            self_ip,
+            self_dns_name,
+            self_https_url,
+            self_relay,
+            version,
+            tailnet_name,
+            peers,
+            exit_node_active,
+            exit_node_name,
+        ) = match tailscale::get_status() {
+            Ok(status) => {
+                let https_url = status.self_node.https_url(&status.cert_domains);
+                (
                     status.backend_state == "Running",
                     status.self_node.display_name().to_string(),
                     status
@@ -91,12 +162,30 @@ impl cosmic::Application for TailscaleApplet {
                         .first()
                         .cloned()
                         .unwrap_or_default(),
+                    status.self_node.dns_display(),
+                    https_url,
+                    status.self_node.relay.clone(),
+                    status.version.clone(),
                     status.tailnet_name.clone(),
                     status.peers.clone(),
                     status.exit_node_active,
-                ),
-                Err(_) => (false, String::new(), String::new(), String::new(), vec![], false),
-            };
+                    status.exit_node_name.clone(),
+                )
+            }
+            Err(_) => (
+                false,
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                vec![],
+                false,
+                String::new(),
+            ),
+        };
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -116,14 +205,19 @@ impl cosmic::Application for TailscaleApplet {
             },
             self_hostname,
             self_ip,
+            self_dns_name,
+            self_https_url,
+            self_relay,
+            version,
             tailnet_name,
             peers,
             exit_node_active,
+            exit_node_name,
             error: None,
-            copied_ip: None,
+            copied_text: None,
             copied_hold_ticks: 0,
             config: AppConfig::load(),
-            editing_ssh_user: None,
+            cred_dialog: None,
             cmd_tx,
             event_rx,
         };
@@ -142,7 +236,7 @@ impl cosmic::Application for TailscaleApplet {
                 if self.copied_hold_ticks > 0 {
                     self.copied_hold_ticks -= 1;
                     if self.copied_hold_ticks == 0 {
-                        self.copied_ip = None;
+                        self.copied_text = None;
                     }
                 }
 
@@ -151,16 +245,23 @@ impl cosmic::Application for TailscaleApplet {
                         TailscaleEvent::StatusUpdate(result) => match result {
                             Ok(status) => {
                                 self.connected = status.backend_state == "Running";
-                                self.self_hostname = status.self_node.display_name().to_string();
+                                self.self_hostname =
+                                    status.self_node.display_name().to_string();
                                 self.self_ip = status
                                     .self_node
                                     .tailscale_ips
                                     .first()
                                     .cloned()
                                     .unwrap_or_default();
+                                self.self_dns_name = status.self_node.dns_display();
+                                self.self_https_url =
+                                    status.self_node.https_url(&status.cert_domains);
+                                self.self_relay = status.self_node.relay.clone();
+                                self.version = status.version.clone();
                                 self.tailnet_name = status.tailnet_name;
                                 self.peers = status.peers;
                                 self.exit_node_active = status.exit_node_active;
+                                self.exit_node_name = status.exit_node_name;
                                 self.error = None;
 
                                 if self.status_hold_ticks > 0 {
@@ -225,145 +326,272 @@ impl cosmic::Application for TailscaleApplet {
                 };
             }
 
-            Message::CopyIp(ip) => {
-                // Use wl-copy for Wayland clipboard
-                let ip_clone = ip.clone();
+            Message::CopyToClipboard(text_val) => {
+                let text_clone = text_val.clone();
                 std::thread::spawn(move || {
                     let _ = std::process::Command::new("wl-copy")
-                        .arg(&ip_clone)
+                        .arg(&text_clone)
                         .spawn();
                 });
-                self.copied_ip = Some(ip);
-                self.copied_hold_ticks = 3; // ~9 seconds at 3s poll
+                self.copied_text = Some(text_val);
+                self.copied_hold_ticks = 1; // ~3 seconds (1 tick at 3s poll ≈ 3s)
             }
 
-            Message::LaunchNoMachine(ip) => {
+            Message::LaunchHttp(dns_name) => {
                 std::thread::spawn(move || {
-                    let nxs_content = format!(
-                        r#"<!DOCTYPE NXClientSettings>
-<NXClientSettings version="2.3" application="nxclient">
- <group name="General">
-  <option key="Connection service" value="nx" />
-  <option key="Server host" value="{ip}" />
-  <option key="Server port" value="22" />
-  <option key="NoMachine daemon port" value="4000" />
-  <option key="Session" value="unix" />
- </group>
- <group name="Login">
-  <option key="Server authentication method" value="system" />
-  <option key="NX login method" value="password" />
-  <option key="Auth" value="EMPTY_PASSWORD" />
-  <option key="User" value="" />
- </group>
-</NXClientSettings>"#
-                    );
-                    // Write session file to ~/.nx/ for nxplayer to read
-                    let nx_dir = dirs::home_dir()
-                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-                        .join(".nx");
-                    let _ = std::fs::create_dir_all(&nx_dir);
-                    let path = nx_dir.join(format!("cosmic-tailscale-{ip}.nxs"));
-                    if let Err(e) = std::fs::write(&path, nxs_content) {
-                        eprintln!("Failed to write .nxs file: {e}");
-                        return;
-                    }
-                    // Try native nxplayer first, fall back to Flatpak version
-                    let native = std::process::Command::new("nxplayer")
-                        .args(["--session"])
-                        .arg(&path)
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&format!("http://{dns_name}"))
                         .spawn();
-                    if native.is_err() {
-                        if let Err(e) = std::process::Command::new("flatpak")
-                            .args(["run", "com.nomachine.nxplayer", "--session"])
-                            .arg(&path)
-                            .spawn()
-                        {
-                            eprintln!("Failed to launch nxplayer: {e}");
-                        }
-                    }
                 });
             }
 
-            Message::LaunchRdp(ip) => {
-                std::thread::spawn(move || {
-                    if let Err(e) = std::process::Command::new("remmina")
-                        .arg(&format!("rdp://{ip}"))
-                        .spawn()
-                    {
-                        eprintln!("Failed to launch remmina: {e}");
-                    }
+            Message::ShowCredDialog {
+                service,
+                dns_name,
+                ip,
+                vnc_type,
+            } => {
+                let saved = self.config.get_creds(service.key(), &dns_name);
+                self.cred_dialog = Some(CredDialog {
+                    username: saved
+                        .map(|c| c.username.clone())
+                        .unwrap_or_default(),
+                    remember: true,
+                    service,
+                    dns_name,
+                    ip,
+                    vnc_type,
                 });
             }
 
-            Message::LaunchSsh(ip) => {
-                // Look up configured SSH username for this peer
-                let ssh_target = self
-                    .peers
-                    .iter()
-                    .find(|p| p.tailscale_ips.first().map(|s| s.as_str()) == Some(&ip))
-                    .and_then(|p| self.config.ssh_usernames.get(&p.hostname))
-                    .filter(|u| !u.is_empty())
-                    .map(|user| format!("{user}@{ip}"))
-                    .unwrap_or_else(|| ip.clone());
-
-                std::thread::spawn(move || {
-                    // Try cosmic-term first, then common terminal emulators
-                    let terminals = [
-                        ("cosmic-term", vec!["-e", "ssh", &ssh_target]),
-                        ("gnome-terminal", vec!["--", "ssh", &ssh_target]),
-                        ("konsole", vec!["-e", "ssh", &ssh_target]),
-                        ("xterm", vec!["-e", "ssh", &ssh_target]),
-                    ];
-                    for (term, args) in &terminals {
-                        if let Ok(_) = std::process::Command::new(term)
-                            .args(args)
-                            .spawn()
-                        {
-                            return;
-                        }
-                    }
-                    eprintln!("Failed to launch ssh: no terminal emulator found");
-                });
-            }
-
-            Message::EditSshUser(hostname) => {
-                let current = self
-                    .config
-                    .ssh_usernames
-                    .get(&hostname)
-                    .cloned()
-                    .unwrap_or_default();
-                self.editing_ssh_user = Some((hostname, current));
-            }
-
-            Message::SshUserInput(text) => {
-                if let Some((_, ref mut input)) = self.editing_ssh_user {
-                    *input = text;
+            Message::CredUsername(val) => {
+                if let Some(ref mut d) = self.cred_dialog {
+                    d.username = val;
                 }
             }
 
-            Message::SaveSshUser(hostname) => {
-                if let Some((_, ref input)) = self.editing_ssh_user {
-                    let username = input.trim().to_string();
-                    if username.is_empty() {
-                        self.config.ssh_usernames.remove(&hostname);
-                    } else {
-                        self.config.ssh_usernames.insert(hostname, username);
-                    }
-                    self.config.save();
+            Message::CredRemember(val) => {
+                if let Some(ref mut d) = self.cred_dialog {
+                    d.remember = val;
                 }
-                self.editing_ssh_user = None;
+            }
+
+            Message::CredConnect => {
+                if let Some(dialog) = self.cred_dialog.take() {
+                    // Save credentials if requested
+                    if dialog.remember {
+                        let creds = Credentials {
+                            username: dialog.username.clone(),
+                        };
+                        self.config
+                            .save_creds(dialog.service.key(), &dialog.dns_name, creds);
+
+                        // Also update ssh_usernames for backwards compat
+                        if dialog.service == CredService::Ssh {
+                            if let Some(peer) = self.peers.iter().find(|p| p.dns_display() == dialog.dns_name) {
+                                if !dialog.username.is_empty() {
+                                    self.config.ssh_usernames.insert(peer.hostname.clone(), dialog.username.clone());
+                                } else {
+                                    self.config.ssh_usernames.remove(&peer.hostname);
+                                }
+                                self.config.save();
+                            }
+                        }
+                    }
+
+                    // Launch the service
+                    let username = dialog.username;
+                    let dns_name = dialog.dns_name;
+                    let ip = dialog.ip;
+                    let vnc_type = dialog.vnc_type;
+
+                    match dialog.service {
+                        CredService::Ssh => {
+                            let target = if username.is_empty() {
+                                dns_name
+                            } else {
+                                format!("{username}@{dns_name}")
+                            };
+                            std::thread::spawn(move || {
+                                let terminals = [
+                                    ("cosmic-term", vec!["-e", "ssh", &target]),
+                                    ("gnome-terminal", vec!["--", "ssh", &target]),
+                                    ("konsole", vec!["-e", "ssh", &target]),
+                                    ("xterm", vec!["-e", "ssh", &target]),
+                                ];
+                                for (term, args) in &terminals {
+                                    if std::process::Command::new(term)
+                                        .args(args)
+                                        .spawn()
+                                        .is_ok()
+                                    {
+                                        return;
+                                    }
+                                }
+                                eprintln!("Failed to launch ssh: no terminal emulator found");
+                            });
+                        }
+                        CredService::Rdp => {
+                            std::thread::spawn(move || {
+                                let remmina_dir = dirs::home_dir()
+                                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                                    .join(".local/share/remmina");
+                                let _ = std::fs::create_dir_all(&remmina_dir);
+                                let profile = remmina_dir
+                                    .join(format!(
+                                        "tailscale-rdp-{}.remmina",
+                                        dns_name.replace(|c: char| !c.is_alphanumeric(), "_")
+                                    ))
+                                    .to_string_lossy()
+                                    .to_string();
+                                // Only create the file if it doesn't exist yet;
+                                // reuse any existing file so user customisations persist.
+                                if !std::path::Path::new(&profile).exists() {
+                                    let content = format!("\
+[remmina]
+name={dns_name}
+protocol=RDP
+server={dns_name}
+username={username}
+colordepth=32
+quality=2
+glyph-cache=true
+network=lan
+gfx=false
+rfx=false
+disableautoreconnect=0
+");
+                                    if let Err(e) = std::fs::write(&profile, &content) {
+                                        eprintln!("Failed to write remmina profile: {e}");
+                                        return;
+                                    }
+                                }
+                                let native = std::process::Command::new("remmina")
+                                    .args(["-c", &profile])
+                                    .spawn();
+                                if native.is_err() {
+                                    if let Err(e) = std::process::Command::new("flatpak")
+                                        .args([
+                                            "run",
+                                            "org.remmina.Remmina",
+                                            "-c",
+                                            &profile,
+                                        ])
+                                        .spawn()
+                                    {
+                                        eprintln!("Failed to launch remmina: {e}");
+                                    }
+                                }
+                            });
+                        }
+                        CredService::Vnc => {
+                            std::thread::spawn(move || {
+                                if vnc_type == VncType::RealVnc {
+                                    if let Err(e) = std::process::Command::new("vncviewer")
+                                        .arg(&dns_name)
+                                        .spawn()
+                                    {
+                                        eprintln!("Failed to launch vncviewer: {e}");
+                                    }
+                                } else {
+                                    let target = if username.is_empty() {
+                                        format!("vnc://{dns_name}")
+                                    } else {
+                                        format!("vnc://{username}@{dns_name}")
+                                    };
+                                    let native =
+                                        std::process::Command::new("remmina").arg(&target).spawn();
+                                    if native.is_err() {
+                                        if let Err(e) = std::process::Command::new("flatpak")
+                                            .args([
+                                                "run",
+                                                "org.remmina.Remmina",
+                                                &target,
+                                            ])
+                                            .spawn()
+                                        {
+                                            eprintln!("Failed to launch remmina: {e}");
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        CredService::NoMachine => {
+                            std::thread::spawn(move || {
+                                let nx_dir = dirs::home_dir()
+                                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                                    .join(".nx");
+                                let _ = std::fs::create_dir_all(&nx_dir);
+                                let nxs_file = nx_dir
+                                    .join(format!(
+                                        "tailscale-nx-{}.nxs",
+                                        dns_name.replace(|c: char| !c.is_alphanumeric(), "_")
+                                    ))
+                                    .to_string_lossy()
+                                    .to_string();
+                                // Only create the file if it doesn't exist yet;
+                                // reuse any existing file so user customisations persist.
+                                if !std::path::Path::new(&nxs_file).exists() {
+                                    let nxs_content = format!("\
+<!DOCTYPE NXClientSettings>
+<NXClientSettings version=\"2.3\" application=\"nxclient\" >
+ <group name=\"General\" >
+  <option key=\"Connection service\" value=\"nx\" />
+  <option key=\"NoMachine daemon port\" value=\"4000\" />
+ </group>
+ <group name=\"Local Settings\" >
+  <option key=\"Server name\" value=\"{dns_name}\" />
+  <option key=\"List of hosts\" value=\"{ip}\" />
+  <option key=\"List of ports\" value=\"4000\" />
+  <option key=\"List of protocols\" value=\"nx\" />
+ </group>
+ <group name=\"Login\" >
+  <option key=\"Server authentication method\" value=\"system\" />
+  <option key=\"System login method\" value=\"password\" />
+  <option key=\"User\" value=\"{username}\" />
+ </group>
+</NXClientSettings>
+");
+                                    if let Err(e) = std::fs::write(&nxs_file, &nxs_content) {
+                                        eprintln!("Failed to write .nxs file: {e}");
+                                        return;
+                                    }
+                                }
+                                let native = std::process::Command::new("nxplayer")
+                                    .args(["--session", &nxs_file])
+                                    .spawn();
+                                if native.is_err() {
+                                    if let Err(e) = std::process::Command::new("flatpak")
+                                        .args([
+                                            "run",
+                                            "--nosocket=wayland",
+                                            "com.nomachine.nxplayer",
+                                            "--session",
+                                            &nxs_file,
+                                        ])
+                                        .spawn()
+                                    {
+                                        eprintln!("Failed to launch nxplayer: {e}");
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+
+            Message::CredCancel => {
+                self.cred_dialog = None;
             }
 
             Message::OpenSettings => {
                 std::thread::spawn(|| {
-                    // Try unified settings hub first, fall back to standalone
                     let unified = std::process::Command::new("cosmic-applet-settings")
                         .arg(APP_ID)
                         .spawn();
                     if unified.is_err() {
-                        let exe = std::env::current_exe()
-                            .unwrap_or_else(|_| "cosmic-tailscale".into());
+                        let exe =
+                            std::env::current_exe().unwrap_or_else(|_| "cosmic-tailscale".into());
                         if let Err(e) = std::process::Command::new(exe)
                             .arg("--settings-standalone")
                             .spawn()
@@ -416,8 +644,8 @@ impl cosmic::Application for TailscaleApplet {
                             let new_id = Id::unique();
                             state.popup = Some(new_id);
 
-                            let popup_width = 360u32;
-                            let popup_height = 450u32;
+                            let popup_width = 380u32;
+                            let popup_height = 500u32;
 
                             let mut popup_settings = state.core.applet.get_popup_settings(
                                 state.core.main_window_id().unwrap(),
@@ -444,7 +672,7 @@ impl cosmic::Application for TailscaleApplet {
                 }
             });
 
-        let tooltip = if self.connected {
+        let tooltip: &str = if self.connected {
             "Tailscale (Connected)"
         } else {
             "Tailscale (Disconnected)"
@@ -487,28 +715,89 @@ impl TailscaleApplet {
             )
         };
 
-        // Title row
-        let title_row = row![text::body("Tailscale"), horizontal_space(),]
-            .spacing(8)
-            .align_y(Alignment::Center);
+        // If credential dialog is active, show it instead of the normal content
+        if let Some(ref dialog) = self.cred_dialog {
+            return self.cred_dialog_view(dialog);
+        }
 
-        // Status and self info
+        // Title row
+        let title_row = row![
+            text::body("Tailscale"),
+            horizontal_space(),
+            widget::button::custom(text::caption("Admin"))
+                .on_press(Message::OpenAdminConsole)
+                .padding([2, 6])
+                .class(cosmic::theme::Button::MenuItem),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        // Status
         let status_text = format!("Status: {}", self.status_message);
         let mut info_col = column![text::body(status_text)].spacing(2);
 
         if self.connected {
+            // This Device section
             if !self.self_hostname.is_empty() {
-                info_col = info_col.push(text::caption(format!("Host: {}", self.self_hostname)));
+                info_col = info_col.push(text::caption(format!("Name: {}", self.self_hostname)));
             }
             if !self.self_ip.is_empty() {
-                info_col = info_col.push(text::caption(format!("IP: {}", self.self_ip)));
+                info_col =
+                    info_col.push(text::caption(format!("Tailscale IP: {}", self.self_ip)));
             }
+            // DNS Name (clickable to copy)
+            if !self.self_dns_name.is_empty() {
+                let is_copied = self.copied_text.as_deref() == Some(&self.self_dns_name);
+                let label = if is_copied {
+                    "DNS Name: Copied!".to_string()
+                } else {
+                    format!("DNS Name: {}", self.self_dns_name)
+                };
+                let dns = self.self_dns_name.clone();
+                info_col = info_col.push(
+                    widget::button::custom(text::caption(label))
+                        .on_press(Message::CopyToClipboard(dns))
+                        .padding([0, 0])
+                        .class(cosmic::theme::Button::MenuItem),
+                );
+            }
+            // HTTPS URL (clickable to copy)
+            if !self.self_https_url.is_empty() {
+                let is_copied = self.copied_text.as_deref() == Some(&self.self_https_url);
+                let label = if is_copied {
+                    "HTTPS: Copied!".to_string()
+                } else {
+                    format!("HTTPS: {}", self.self_https_url)
+                };
+                let url = self.self_https_url.clone();
+                info_col = info_col.push(
+                    widget::button::custom(text::caption(label))
+                        .on_press(Message::CopyToClipboard(url))
+                        .padding([0, 0])
+                        .class(cosmic::theme::Button::MenuItem),
+                );
+            }
+            // Relay
+            if !self.self_relay.is_empty() {
+                info_col =
+                    info_col.push(text::caption(format!("Relay: {}", self.self_relay)));
+            }
+            // Network section
             if !self.tailnet_name.is_empty() {
                 info_col =
-                    info_col.push(text::caption(format!("Network: {}", self.tailnet_name)));
+                    info_col.push(text::caption(format!("Tailnet: {}", self.tailnet_name)));
             }
             if self.exit_node_active {
-                info_col = info_col.push(text::caption("Exit node: active"));
+                let label = if self.exit_node_name.is_empty() {
+                    "Exit node: active".to_string()
+                } else {
+                    format!("Exit node: {}", self.exit_node_name)
+                };
+                info_col = info_col.push(text::caption(label));
+            }
+            // Version
+            if !self.version.is_empty() {
+                info_col = info_col.push(text::caption(format!("Version: {}", self.version)));
             }
         }
 
@@ -541,7 +830,7 @@ impl TailscaleApplet {
         // Peers section
         let online_count = self.peers.iter().filter(|p| p.online).count();
         let total_count = self.peers.len();
-        let peers_header = text::body(format!("Devices ({online_count}/{total_count} online)"));
+        let peers_header = text::body(format!("Peers ({online_count}/{total_count} online)"));
 
         let mut peers_col = column![peers_header].spacing(2);
 
@@ -553,11 +842,9 @@ impl TailscaleApplet {
 
         // Bottom actions row
         let actions_row = row![
-            widget::button::standard("Admin Console")
-                .on_press(Message::OpenAdminConsole),
+            widget::button::standard("Admin Console").on_press(Message::OpenAdminConsole),
             horizontal_space(),
-            widget::button::standard("Settings...")
-                .on_press(Message::OpenSettings),
+            widget::button::standard("Settings...").on_press(Message::OpenSettings),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -581,17 +868,27 @@ impl TailscaleApplet {
         use cosmic::iced::Alignment;
 
         let ip_str = peer.tailscale_ips.first().cloned().unwrap_or_default();
+        let dns_display = peer.dns_display();
 
         let status_indicator = if peer.online { "● " } else { "○ " };
 
         let name_label = format!(
             "{status_indicator}{} ({})",
-            peer.display_name(), peer.os
+            peer.display_name(),
+            peer.os
         );
 
-        // Show "Copied!" feedback for the peer whose IP was just copied
-        let ip_label = if self.copied_ip.as_deref() == Some(&ip_str) {
+        // Show "Copied!" feedback for the peer whose DNS/IP was just copied
+        let copy_target = if dns_display.is_empty() {
+            ip_str.clone()
+        } else {
+            dns_display.clone()
+        };
+        let is_copied = self.copied_text.as_deref() == Some(&copy_target);
+        let ip_label = if is_copied {
             "  Copied!".to_string()
+        } else if !dns_display.is_empty() {
+            format!("  {dns_display}")
         } else {
             format!("  {ip_str}")
         };
@@ -602,86 +899,183 @@ impl TailscaleApplet {
             peer_col = peer_col.push(text::caption("  Exit node (active)"));
         }
 
-        // Wrap in a clickable button using MenuItem style — full width
-        let ip_for_click = ip_str.clone();
+        // Wrap in a clickable button — copies DNS name (or IP if no DNS)
+        let copy_val = copy_target.clone();
         let peer_btn: Element<Message> = widget::button::custom(peer_col)
-            .on_press(Message::CopyIp(ip_for_click))
+            .on_press(Message::CopyToClipboard(copy_val))
             .padding([4, 8])
             .class(cosmic::theme::Button::MenuItem)
             .width(Length::Fill)
             .into();
 
         if peer.online {
-            let is_editing = self
-                .editing_ssh_user
-                .as_ref()
-                .map(|(h, _)| h == &peer.hostname)
-                .unwrap_or(false);
+            let svc = &peer.services;
+            let mut buttons: Vec<Element<Message>> = Vec::new();
 
-            let rdp_btn: Element<Message> = widget::button::standard("RDP")
-                .on_press(Message::LaunchRdp(ip_str.clone()))
-                .into();
-
-            let nx_btn: Element<Message> = widget::button::standard("NX")
-                .on_press(Message::LaunchNoMachine(ip_str.clone()))
-                .into();
-
-            let buttons_row = if is_editing {
-                let input_value = self
-                    .editing_ssh_user
-                    .as_ref()
-                    .map(|(_, v)| v.as_str())
-                    .unwrap_or("");
-                let hostname = peer.hostname.clone();
-                let hostname2 = peer.hostname.clone();
-
-                let input: Element<Message> = widget::text_input("username", input_value)
-                    .on_input(Message::SshUserInput)
-                    .on_submit(move |_| Message::SaveSshUser(hostname.clone()))
-                    .width(Length::Fixed(100.0))
-                    .into();
-
-                let save_btn: Element<Message> = widget::button::standard("Save")
-                    .on_press(Message::SaveSshUser(hostname2))
-                    .into();
-
-                row![input, save_btn, rdp_btn, nx_btn]
-                    .spacing(4)
-                    .align_y(Alignment::Center)
+            let dns_or_ip = if dns_display.is_empty() {
+                ip_str.clone()
             } else {
-                let configured_user = self
-                    .config
-                    .ssh_usernames
-                    .get(&peer.hostname)
-                    .filter(|u| !u.is_empty());
-
-                let user_label = match configured_user {
-                    Some(user) => format!("{user}@"),
-                    None => "user@".to_string(),
-                };
-
-                let hostname = peer.hostname.clone();
-                let user_btn: Element<Message> = widget::button::custom(text::caption(user_label))
-                    .on_press(Message::EditSshUser(hostname))
-                    .padding([2, 4])
-                    .class(cosmic::theme::Button::MenuItem)
-                    .into();
-
-                let ssh_btn: Element<Message> = widget::button::standard("SSH")
-                    .on_press(Message::LaunchSsh(ip_str))
-                    .into();
-
-                row![user_btn, ssh_btn, rdp_btn, nx_btn]
-                    .spacing(4)
-                    .align_y(Alignment::Center)
+                dns_display.clone()
             };
 
-            column![peer_btn, buttons_row]
-                .spacing(2)
-                .into()
+            // SSH
+            if svc.ssh || peer.ssh_enabled {
+                buttons.push(Self::icon_btn(
+                    "utilities-terminal-symbolic",
+                    true,
+                    Message::ShowCredDialog {
+                        service: CredService::Ssh,
+                        dns_name: dns_or_ip.clone(),
+                        ip: ip_str.clone(),
+                        vnc_type: VncType::None,
+                    },
+                ));
+            }
+
+            // VNC
+            if svc.vnc {
+                let icon = if svc.vnc_type == VncType::RealVnc {
+                    "io.github.reality2_roycdavies.cosmic-tailscale-realvnc"
+                } else {
+                    "io.github.reality2_roycdavies.cosmic-tailscale-vnc"
+                };
+                buttons.push(Self::icon_btn(
+                    icon,
+                    false,
+                    Message::ShowCredDialog {
+                        service: CredService::Vnc,
+                        dns_name: dns_or_ip.clone(),
+                        ip: ip_str.clone(),
+                        vnc_type: svc.vnc_type.clone(),
+                    },
+                ));
+            }
+
+            // RDP
+            if svc.rdp {
+                buttons.push(Self::icon_btn(
+                    "folder-remote-symbolic",
+                    true,
+                    Message::ShowCredDialog {
+                        service: CredService::Rdp,
+                        dns_name: dns_or_ip.clone(),
+                        ip: ip_str.clone(),
+                        vnc_type: VncType::None,
+                    },
+                ));
+            }
+
+            // NoMachine
+            if svc.nomachine {
+                buttons.push(Self::icon_btn(
+                    "io.github.reality2_roycdavies.cosmic-tailscale-nomachine",
+                    false,
+                    Message::ShowCredDialog {
+                        service: CredService::NoMachine,
+                        dns_name: dns_or_ip.clone(),
+                        ip: ip_str.clone(),
+                        vnc_type: VncType::None,
+                    },
+                ));
+            }
+
+            // HTTP
+            if svc.http {
+                buttons.push(Self::icon_btn(
+                    "web-browser-symbolic",
+                    true,
+                    Message::LaunchHttp(dns_or_ip.clone()),
+                ));
+            }
+
+            // HTTPS copy
+            if svc.https {
+                let url = peer.https_url();
+                if !url.is_empty() {
+                    let is_url_copied = self.copied_text.as_deref() == Some(&url);
+                    let icon = if is_url_copied {
+                        "object-select-symbolic"
+                    } else {
+                        "edit-copy-symbolic"
+                    };
+                    buttons.push(Self::icon_btn(
+                        icon,
+                        true,
+                        Message::CopyToClipboard(url),
+                    ));
+                }
+            }
+
+            if buttons.is_empty() {
+                peer_btn
+            } else {
+                let mut buttons_row = row![].spacing(4).align_y(Alignment::Center);
+                for btn in buttons {
+                    buttons_row = buttons_row.push(btn);
+                }
+                column![peer_btn, buttons_row].spacing(2).into()
+            }
         } else {
             peer_btn
         }
+    }
+
+    fn icon_btn(icon_name: &str, symbolic: bool, msg: Message) -> Element<'static, Message> {
+        let icon: Element<Message> = widget::icon::from_name(icon_name)
+            .symbolic(symbolic)
+            .size(16)
+            .into();
+        widget::button::custom(icon)
+            .on_press(msg)
+            .padding([4, 4])
+            .class(cosmic::theme::Button::MenuItem)
+            .into()
+    }
+
+    fn cred_dialog_view<'a>(&'a self, dialog: &'a CredDialog) -> widget::Column<'a, Message> {
+        use cosmic::iced::widget::{column, horizontal_space, row};
+        use cosmic::iced::Alignment;
+
+        let title = format!("{} Connect", dialog.service.label());
+        let host_label = dialog.dns_name.clone();
+
+        let username_input: Element<Message> = widget::text_input("username", &dialog.username)
+            .on_input(Message::CredUsername)
+            .width(Length::Fill)
+            .into();
+
+        let mut content = column![
+            text::body(title),
+            text::caption(host_label),
+            row![text::caption("Username"), username_input]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        ]
+        .spacing(8)
+        .padding(12);
+
+        // Remember checkbox
+        let remember: Element<Message> = widget::toggler(dialog.remember)
+            .on_toggle(Message::CredRemember)
+            .into();
+        content = content.push(
+            row![text::caption("Remember"), remember]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        );
+
+        // Buttons
+        content = content.push(
+            row![
+                widget::button::standard("Cancel").on_press(Message::CredCancel),
+                horizontal_space(),
+                widget::button::suggested("Connect").on_press(Message::CredConnect),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+
+        content
     }
 }
 
@@ -711,11 +1105,25 @@ async fn run_background(
             }
         }
 
-        // Poll current status
-        let status = tailscale::get_status();
-        let _ = event_tx.send(TailscaleEvent::StatusUpdate(status));
+        // Poll current status and probe services on online peers
+        match tailscale::get_status() {
+            Ok(mut status) => {
+                // Probe services for online peers
+                for peer in &mut status.peers {
+                    if peer.online {
+                        if let Some(ip) = peer.tailscale_ips.first() {
+                            peer.services = tailscale::probe_services(ip);
+                        }
+                    }
+                }
+                let _ = event_tx.send(TailscaleEvent::StatusUpdate(Ok(status)));
+            }
+            Err(e) => {
+                let _ = event_tx.send(TailscaleEvent::StatusUpdate(Err(e)));
+            }
+        }
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 }
 
